@@ -14,10 +14,10 @@ jobs:
 
       - name: Build Android APK
         run: |
-          docker run --rm \
+          yes | docker run --rm -i \
             -v "$PWD":/home/user/hostcwd \
             ghcr.io/kivy/buildozer:latest \
-            android debug --sdk-accept-licenses
+            android debug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
