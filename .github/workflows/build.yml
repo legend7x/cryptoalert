@@ -12,12 +12,12 @@ jobs:
       - name: Checkout project
         uses: actions/checkout@v4
 
-      - name: Build APK with official Buildozer image
+      - name: Build Android APK
         run: |
           docker run --rm \
-            --volume "$PWD":/home/user/hostcwd \
+            -v "$PWD":/home/user/hostcwd \
             ghcr.io/kivy/buildozer:latest \
-            android debug
+            android debug --sdk-accept-licenses
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
