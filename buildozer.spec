@@ -36,7 +36,8 @@ android.permissions = INTERNET,POST_NOTIFICATIONS,FOREGROUND_SERVICE
 android.api = 35
 
 # الحد الأدنى
-android.minapi = 23
+android.minapi = 24
+android.ndk_api = 24
 
 # معماريات Android
 android.archs = arm64-v8a,armeabi-v7a
