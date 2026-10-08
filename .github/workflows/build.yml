@@ -1,21 +1,27 @@
+
 name: Build Android APK
+
 on:
   workflow_dispatch:
-  push:
-    branches: [main, master]
+
 jobs:
   apk:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Build APK with Buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1
-        with:
-          command: buildozer android debug
-          buildozer_version: stable
-      - name: Upload installable APK
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Build APK with official Buildozer image
+        run: |
+          docker run --rm \
+            --volume "$PWD":/home/user/hostcwd \
+            ghcr.io/kivy/buildozer:latest \
+            android debug
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: crypto-alert-apk
+          name: CryptoAlert-APK
           path: bin/*.apk
           if-no-files-found: error
