@@ -1,6 +1,9 @@
 # ============================================================
 # Crypto Alert
 # Binance + CoinGecko
+# USD + USDT
+# Dynamic Coin Search
+# Scrollable Interface
 # ============================================================
 
 import json
@@ -8,9 +11,9 @@ import threading
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 
 import websocket
-from plyer import notification
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -19,84 +22,73 @@ from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
 from kivy.uix.spinner import Spinner
+from kivy.uix.scrollview import ScrollView
 
 
 class CryptoAlertApp(App):
 
-    # ========================================================
-    # بداية البرنامج
-    # ========================================================
-
     def build(self):
-        try:
-            from android.permissions import request_permissions, Permission
-            request_permissions([Permission.POST_NOTIFICATIONS])
-        except (ImportError, AttributeError):
-            pass
 
-        # السعر الحالي
         self.price = 0.0
-
-        # السعر المستهدف
+        self.raw_price = 0.0
         self.target_price = None
 
-        # هل التنبيه يعمل؟
         self.alert_enabled = False
-
-        # هل تم تنفيذ التنبيه؟
         self.alert_triggered = False
 
-        # العملة الحالية
         self.symbol = "BTCUSDT"
-
-        # المنصة الحالية
         self.platform = "Binance"
+        self.quote_currency = "USD"
 
-        # اتصال Binance
         self.ws = None
+        self.binance_version = 0
 
-        # ====================================================
-        # CoinGecko
-        # ====================================================
-
-        # هل CoinGecko يعمل؟
         self.coingecko_running = False
-
-        # رقم المراقب الحالي
-        #
-        # يستخدم لمنع تشغيل أكثر من Thread
-        # قديم في نفس الوقت.
-        #
         self.coingecko_version = 0
 
+        self.usdt_to_usd = 1.0
+        self.usdt_rate_updated = False
+
+        # Cache for dynamically discovered CoinGecko coins
+        self.coin_cache = {}
+        self.coin_cache_lock = threading.Lock()
+
         # ====================================================
-        # إنشاء الواجهة
+        # Scrollable interface
         # ====================================================
 
-        layout = BoxLayout(
+        root = BoxLayout(orientation="horizontal")
+
+        scroll = ScrollView(
+            do_scroll_x=False,
+            do_scroll_y=True,
+            bar_width=12,
+            scroll_type=["bars", "content"],
+            bar_color=(0.2, 0.65, 1, 1),
+            bar_inactive_color=(0.4, 0.4, 0.4, 0.5)
+        )
+
+        content = BoxLayout(
             orientation="vertical",
             padding=30,
-            spacing=12
+            spacing=12,
+            size_hint_y=None
         )
 
-        # ====================================================
-        # العنوان
-        # ====================================================
-
-        title = Label(
-            text="Crypto Alert",
-            font_size=32,
-            size_hint_y=None,
-            height=55
+        content.bind(
+            minimum_height=content.setter("height")
         )
 
-        layout.add_widget(title)
+        content.add_widget(
+            Label(
+                text="Crypto Alert",
+                font_size=32,
+                size_hint_y=None,
+                height=65
+            )
+        )
 
-        # ====================================================
-        # المنصة
-        # ====================================================
-
-        layout.add_widget(
+        content.add_widget(
             Label(
                 text="Platform",
                 font_size=18,
@@ -107,26 +99,17 @@ class CryptoAlertApp(App):
 
         self.platform_box = Spinner(
             text="Binance",
-            values=(
-                "Binance",
-                "CoinGecko"
-            ),
+            values=("Binance", "CoinGecko"),
             font_size=20,
             size_hint_y=None,
             height=55
         )
 
-        layout.add_widget(
-            self.platform_box
-        )
+        content.add_widget(self.platform_box)
 
-        # ====================================================
-        # العملة
-        # ====================================================
-
-        layout.add_widget(
+        content.add_widget(
             Label(
-                text="Crypto pair",
+                text="Crypto Symbol / Pair",
                 font_size=18,
                 size_hint_y=None,
                 height=30
@@ -135,36 +118,82 @@ class CryptoAlertApp(App):
 
         self.symbol_box = TextInput(
             text="BTCUSDT",
-            hint_text="Example: BTCUSDT",
+            hint_text="Example: BTCUSDT or BTC",
             multiline=False,
             font_size=22,
             size_hint_y=None,
             height=55
         )
 
-        layout.add_widget(
-            self.symbol_box
+        content.add_widget(self.symbol_box)
+
+        # Search button for CoinGecko
+        self.search_button = Button(
+            text="Search Coin",
+            font_size=18,
+            size_hint_y=None,
+            height=50
         )
 
-        # ====================================================
-        # السعر الحالي
-        # ====================================================
+        self.search_button.bind(
+            on_press=self.search_coin
+        )
+
+        content.add_widget(self.search_button)
+
+        self.search_results = Spinner(
+            text="Select a search result",
+            values=(),
+            font_size=16,
+            size_hint_y=None,
+            height=55
+        )
+
+        content.add_widget(self.search_results)
+
+        self.search_results.bind(
+            text=self.on_coin_selected
+        )
+
+        content.add_widget(
+            Label(
+                text="Display Currency",
+                font_size=18,
+                size_hint_y=None,
+                height=30
+            )
+        )
+
+        self.currency_box = Spinner(
+            text="USD",
+            values=("USD", "USDT"),
+            font_size=20,
+            size_hint_y=None,
+            height=55
+        )
+
+        content.add_widget(self.currency_box)
 
         self.price_label = Label(
-            text="BTC/USDT\nConnecting...",
-            font_size=28
+            text="BTC/USD\nConnecting...",
+            font_size=28,
+            size_hint_y=None,
+            height=100
         )
 
-        layout.add_widget(
-            self.price_label
-        )
+        content.add_widget(self.price_label)
 
-        # ====================================================
-        # السعر المستهدف
-        # ====================================================
+        content.add_widget(
+            Label(
+                text="Target Price (selected currency)",
+                font_size=18,
+                size_hint_y=None,
+                height=30
+            )
+        )
 
         self.target_box = TextInput(
-            hint_text="Target price",
+            hint_text="Enter target price",
             multiline=False,
             input_filter="float",
             font_size=22,
@@ -172,13 +201,16 @@ class CryptoAlertApp(App):
             height=55
         )
 
-        layout.add_widget(
-            self.target_box
-        )
+        content.add_widget(self.target_box)
 
-        # ====================================================
-        # نوع التنبيه
-        # ====================================================
+        content.add_widget(
+            Label(
+                text="Alert Condition",
+                font_size=18,
+                size_hint_y=None,
+                height=30
+            )
+        )
 
         self.condition_box = Spinner(
             text="Price reaches or goes above",
@@ -186,18 +218,12 @@ class CryptoAlertApp(App):
                 "Price reaches or goes above",
                 "Price reaches or goes below"
             ),
-            font_size=18,
+            font_size=16,
             size_hint_y=None,
             height=55
         )
 
-        layout.add_widget(
-            self.condition_box
-        )
-
-        # ====================================================
-        # زر تشغيل التنبيه
-        # ====================================================
+        content.add_widget(self.condition_box)
 
         self.alert_button = Button(
             text="Enable Alert",
@@ -210,13 +236,7 @@ class CryptoAlertApp(App):
             on_press=self.enable_alert
         )
 
-        layout.add_widget(
-            self.alert_button
-        )
-
-        # ====================================================
-        # زر التحديث اليدوي
-        # ====================================================
+        content.add_widget(self.alert_button)
 
         self.refresh_button = Button(
             text="Refresh Now",
@@ -229,997 +249,860 @@ class CryptoAlertApp(App):
             on_press=self.refresh_price
         )
 
-        layout.add_widget(
-            self.refresh_button
-        )
-
-        # ====================================================
-        # الحالة
-        # ====================================================
+        content.add_widget(self.refresh_button)
 
         self.status_label = Label(
-            text="No alert",
-            font_size=18
+            text="Starting...",
+            font_size=18,
+            size_hint_y=None,
+            height=90
         )
 
-        layout.add_widget(
-            self.status_label
-        )
+        content.add_widget(self.status_label)
 
-        # ====================================================
-        # تشغيل Binance عند فتح البرنامج
-        # ====================================================
+        scroll.add_widget(content)
+        root.add_widget(scroll)
 
-        thread = threading.Thread(
+        # Start USDT/USD conversion updater
+        threading.Thread(
+            target=self.update_usdt_rate,
+            daemon=True
+        ).start()
+
+        # Initial Binance connection
+        threading.Thread(
             target=self.start_binance,
             args=("BTCUSDT",),
             daemon=True
-        )
+        ).start()
 
-        thread.start()
-
-        return layout
+        return root
 
     # ========================================================
-    # تفعيل التنبيه
+    # HTTP JSON helper
+    # ========================================================
+
+    def get_json(self, url, timeout=15):
+
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "CryptoAlert/1.0",
+                "Accept": "application/json"
+            }
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=timeout
+        ) as response:
+
+            return json.loads(
+                response.read().decode("utf-8")
+            )
+
+    # ========================================================
+    # Dynamic CoinGecko search
+    # ========================================================
+
+    def search_coin(self, button):
+
+        query = self.symbol_box.text.strip()
+
+        if not query:
+            self.status_label.text = "Enter a coin name or symbol"
+            return
+
+        self.status_label.text = "Searching CoinGecko..."
+
+        threading.Thread(
+            target=self.search_coin_worker,
+            args=(query,),
+            daemon=True
+        ).start()
+
+    def search_coin_worker(self, query):
+
+        try:
+
+            url = (
+                "https://api.coingecko.com/api/v3/search?"
+                + urllib.parse.urlencode({
+                    "query": query
+                })
+            )
+
+            data = self.get_json(url)
+
+            coins = data.get("coins", [])
+
+            # Match exact symbols first, then partial matches.
+            query_lower = query.lower()
+
+            exact = [
+                coin for coin in coins
+                if coin.get("symbol", "").lower() == query_lower
+            ]
+
+            others = [
+                coin for coin in coins
+                if coin not in exact
+            ]
+
+            results = (exact + others)[:30]
+
+            if not results:
+                Clock.schedule_once(
+                    lambda dt: self.show_search_results(
+                        [],
+                        "No matching coins found"
+                    )
+                )
+                return
+
+            with self.coin_cache_lock:
+                for coin in results:
+                    self.coin_cache[coin["id"]] = coin
+
+            Clock.schedule_once(
+                lambda dt, items=results:
+                self.show_search_results(
+                    items,
+                    "Choose a coin"
+                )
+            )
+
+        except Exception as error:
+
+            print("CoinGecko search error:", error)
+
+            Clock.schedule_once(
+                lambda dt:
+                self.show_status("Coin search failed")
+            )
+
+    def show_search_results(self, coins, message):
+
+        self.search_result_map = {}
+
+        values = []
+
+        for coin in coins:
+
+            coin_id = coin.get("id", "")
+            name = coin.get("name", "Unknown")
+            symbol = coin.get("symbol", "").upper()
+
+            # ID is included to distinguish coins with identical symbols.
+            label = "{} ({}) - {}".format(
+                name,
+                symbol,
+                coin_id
+            )
+
+            self.search_result_map[label] = coin
+            values.append(label)
+
+        self.search_results.values = tuple(values)
+
+        if values:
+            self.search_results.text = values[0]
+            self.status_label.text = (
+                "Found {} coins. Select the correct result.".format(
+                    len(values)
+                )
+            )
+            self.on_coin_selected(
+                self.search_results,
+                values[0]
+            )
+        else:
+            self.search_results.text = message
+            self.status_label.text = message
+
+    def on_coin_selected(self, spinner, text):
+
+        coin = getattr(
+            self,
+            "search_result_map",
+            {}
+        ).get(text)
+
+        if not coin:
+            return
+
+        # Store the real CoinGecko ID.
+        self.selected_coin_id = coin.get("id")
+
+        symbol = coin.get("symbol", "").upper()
+
+        if symbol:
+            self.symbol_box.text = symbol
+
+        self.status_label.text = (
+            "Selected: {} ({})".format(
+                coin.get("name", ""),
+                self.selected_coin_id
+            )
+        )
+
+    # ========================================================
+    # USDT/USD conversion
+    # ========================================================
+
+    def update_usdt_rate(self):
+
+        while True:
+
+            try:
+
+                url = (
+                    "https://api.coingecko.com/api/v3/simple/price?"
+                    + urllib.parse.urlencode({
+                        "ids": "tether",
+                        "vs_currencies": "usd"
+                    })
+                )
+
+                data = self.get_json(url)
+
+                rate = float(data["tether"]["usd"])
+
+                if rate > 0:
+                    self.usdt_to_usd = rate
+                    self.usdt_rate_updated = True
+
+                    print("USDT/USD rate:", rate)
+
+            except Exception as error:
+                print("USDT conversion error:", error)
+
+            time.sleep(60)
+
+    # ========================================================
+    # Enable alert
     # ========================================================
 
     def enable_alert(self, button):
 
-        # ----------------------------------------------------
-        # قراءة العملة
-        # ----------------------------------------------------
+        symbol = self.symbol_box.text.upper().strip()
+        symbol = symbol.replace("/", "").replace(" ", "")
 
-        symbol = self.symbol_box.text.upper()
-
-        symbol = symbol.replace(
-            " ",
-            ""
-        )
-
-        symbol = symbol.replace(
-            "/",
-            ""
-        )
-
-        if symbol == "":
-
-            self.status_label.text = (
-                "Please enter a crypto pair"
-            )
-
+        if not symbol:
+            self.status_label.text = "Please enter a coin symbol"
             return
 
-        # ----------------------------------------------------
-        # قراءة السعر المستهدف
-        # ----------------------------------------------------
-
         try:
-
-            target = float(
-                self.target_box.text
-            )
-
+            target = float(self.target_box.text)
         except ValueError:
-
-            self.status_label.text = (
-                "Please enter a correct price"
-            )
-
+            self.status_label.text = "Enter a valid target price"
             return
 
         if target <= 0:
-
-            self.status_label.text = (
-                "Price must be greater than 0"
-            )
-
+            self.status_label.text = "Price must be greater than 0"
             return
 
-        # ----------------------------------------------------
-        # قراءة المنصة
-        # ----------------------------------------------------
+        platform = self.platform_box.text
+        quote = self.currency_box.text.upper()
 
-        platform = (
-            self.platform_box.text
-        )
+        if platform == "Binance":
 
-        # ----------------------------------------------------
-        # حفظ البيانات
-        # ----------------------------------------------------
+            # Binance needs an actual trading pair.
+            if not any(
+                symbol.endswith(suffix)
+                for suffix in (
+                    "USDT", "USDC", "BUSD", "FDUSD",
+                    "BTC", "ETH", "BNB"
+                )
+            ):
+                self.status_label.text = (
+                    "Enter a Binance trading pair, e.g. BTCUSDT"
+                )
+                return
+
+        else:
+
+            coin_id = self.get_selected_coin_id(symbol)
+
+            if not coin_id:
+                self.status_label.text = (
+                    "Search for the coin and select the correct result first"
+                )
+                return
+
+            self.selected_coin_id = coin_id
 
         self.symbol = symbol
-
         self.target_price = target
-
         self.platform = platform
+        self.quote_currency = quote
 
         self.alert_enabled = True
-
         self.alert_triggered = False
 
-        # ====================================================
-        # إيقاف الاتصالات القديمة
-        # ====================================================
-
         self.stop_coingecko()
-
         self.close_binance()
-
-        # ====================================================
-        # تحديث الحالة
-        # ====================================================
 
         self.status_label.text = (
             "Connecting...\n"
             + platform
             + "\n"
             + symbol
+            + "\nCurrency: "
+            + quote
         )
 
-        self.alert_button.text = (
-            "Alert Enabled"
-        )
-
-        # ====================================================
-        # تشغيل Binance
-        # ====================================================
+        self.alert_button.text = "Alert Enabled"
 
         if platform == "Binance":
-
-            thread = threading.Thread(
-                target=self.start_binance,
-                args=(symbol,),
-                daemon=True
-            )
-
-            thread.start()
-
-        # ====================================================
-        # تشغيل CoinGecko
-        # ====================================================
-
+            self.start_new_binance(symbol)
         else:
+            self.start_new_coingecko(symbol)
 
-            self.start_new_coingecko(
-                symbol
-            )
+    def get_selected_coin_id(self, symbol):
+
+        # Prefer the ID explicitly selected in search results.
+        coin_id = getattr(self, "selected_coin_id", None)
+
+        if coin_id:
+            selected = getattr(
+                self,
+                "search_result_map",
+                {}
+            ).get(self.search_results.text)
+
+            if selected and selected.get("id") == coin_id:
+                return coin_id
+
+        return None
 
     # ========================================================
-    # إغلاق Binance
+    # Binance connection
     # ========================================================
 
     def close_binance(self):
 
-        if self.ws is not None:
+        self.binance_version += 1
 
+        ws = self.ws
+        self.ws = None
+
+        if ws is not None:
             try:
-
-                self.ws.close()
-
+                ws.close()
             except Exception:
                 pass
 
-            self.ws = None
+    def start_new_binance(self, symbol):
+
+        self.close_binance()
+        version = self.binance_version
+
+        threading.Thread(
+            target=self.start_binance,
+            args=(symbol, version),
+            daemon=True
+        ).start()
+
+    def start_binance(self, symbol, version=None):
+
+        if version is None:
+            version = self.binance_version
+
+        symbol = symbol.lower()
+
+        url = (
+            "wss://stream.binance.com:9443/ws/"
+            + symbol
+            + "@ticker"
+        )
+
+        def on_message(ws, message):
+
+            if version != self.binance_version:
+                return
+
+            try:
+                data = json.loads(message)
+
+                if "c" not in data:
+                    return
+
+                raw_price = float(data["c"])
+
+                Clock.schedule_once(
+                    lambda dt, p=raw_price, v=version:
+                    self.handle_binance_price(p, v)
+                )
+
+            except Exception as error:
+                print("Binance message error:", error)
+
+        def on_open(ws):
+            print("Binance connected:", symbol.upper())
+
+        def on_error(ws, error):
+            print("Binance error:", error)
+
+        def on_close(ws, code, message):
+            print("Binance connection closed")
+
+        try:
+
+            ws = websocket.WebSocketApp(
+                url,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+
+            if version != self.binance_version:
+                ws.close()
+                return
+
+            self.ws = ws
+            ws.run_forever()
+
+        except Exception as error:
+            print("Binance connection error:", error)
+
+    def handle_binance_price(self, raw_price, version):
+
+        if version != self.binance_version:
+            return
+
+        if self.platform != "Binance":
+            return
+
+        self.raw_price = raw_price
+
+        if self.symbol.endswith("USDT"):
+
+            if self.quote_currency == "USD":
+
+                if not self.usdt_rate_updated:
+                    self.status_label.text = (
+                        "Waiting for USDT/USD conversion rate"
+                    )
+                    return
+
+                display_price = raw_price * self.usdt_to_usd
+
+            else:
+                display_price = raw_price
+
+        elif self.symbol.endswith("USDC"):
+            # USDC is close to USD, but not guaranteed to equal it.
+            if self.quote_currency == "USD":
+                display_price = raw_price
+            else:
+                if not self.usdt_rate_updated:
+                    return
+                display_price = raw_price / self.usdt_to_usd
+
+        else:
+            display_price = raw_price
+
+        self.show_price(display_price)
 
     # ========================================================
-    # إيقاف CoinGecko
+    # CoinGecko lifecycle
     # ========================================================
 
     def stop_coingecko(self):
 
         self.coingecko_running = False
-
-        # تغيير الرقم يجعل أي Thread قديم يتوقف
         self.coingecko_version += 1
 
-    # ========================================================
-    # تشغيل CoinGecko جديد
-    # ========================================================
+    def start_new_coingecko(self, symbol):
 
-    def start_new_coingecko(
-        self,
-        symbol
-    ):
-
-        # أولًا نوقف القديم
         self.stop_coingecko()
-
-        # نزيد الرقم
         self.coingecko_version += 1
 
-        # حفظ رقم هذا Thread
         version = self.coingecko_version
-
-        # تشغيل CoinGecko
         self.coingecko_running = True
 
-        thread = threading.Thread(
+        threading.Thread(
             target=self.start_coingecko,
-            args=(
-                symbol,
-                version
-            ),
+            args=(symbol, version),
             daemon=True
-        )
-
-        thread.start()
+        ).start()
 
     # ========================================================
-    # Binance
+    # Fetch CoinGecko price
+    # Fetch USD and convert USD -> USDT if needed
     # ========================================================
 
-    def start_binance(
-        self,
-        symbol
-    ):
-
-        symbol = symbol.lower()
+    def fetch_coingecko_price(self, coin_id, quote_currency):
 
         url = (
-            "wss://stream.binance.com:9443/"
-            "ws/"
-            + symbol
-            + "@ticker"
+            "https://api.coingecko.com/api/v3/simple/price?"
+            + urllib.parse.urlencode({
+                "ids": coin_id,
+                "vs_currencies": "usd"
+            })
         )
 
-        print()
-        print(
-            "Connecting to Binance..."
-        )
-        print(
-            "Symbol:",
-            symbol
-        )
-        print()
+        data = self.get_json(url)
 
         try:
-
-            ws = websocket.WebSocketApp(
-
-                url,
-
-                on_open=self.binance_connected,
-
-                on_message=self.binance_message,
-
-                on_error=self.binance_error,
-
-                on_close=self.binance_closed
+            usd_price = float(data[coin_id]["usd"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(
+                "USD price not found for " + coin_id
             )
 
-            self.ws = ws
+        quote = quote_currency.upper()
 
-            ws.run_forever()
+        if quote == "USD":
+            return usd_price
 
-        except Exception as error:
+        if quote == "USDT":
 
-            print(
-                "Binance error:",
-                error
-            )
+            if not self.usdt_rate_updated:
+                raise ValueError(
+                    "Waiting for USDT/USD conversion rate"
+                )
 
-    # ========================================================
-    # Binance - تم الاتصال
-    # ========================================================
+            if self.usdt_to_usd <= 0:
+                raise ValueError(
+                    "Invalid USDT/USD conversion rate"
+                )
 
-    def binance_connected(
-        self,
-        ws
-    ):
+            return usd_price / self.usdt_to_usd
 
-        print(
-            "Binance connected!"
-        )
+        raise ValueError("Unsupported currency: " + quote)
 
-    # ========================================================
-    # Binance - رسالة جديدة
-    # ========================================================
+    def start_coingecko(self, symbol, version):
 
-    def binance_message(
-        self,
-        ws,
-        message
-    ):
+        coin_id = getattr(self, "selected_coin_id", None)
 
-        try:
-
-            data = json.loads(
-                message
-            )
-
-            if "c" not in data:
-
-                return
-
-            price = float(
-                data["c"]
-            )
-
+        if not coin_id:
             Clock.schedule_once(
-                lambda dt, p=price:
-                self.show_price(p)
-            )
-
-        except Exception as error:
-
-            print(
-                "Binance message error:",
-                error
-            )
-
-    # ========================================================
-    # Binance - خطأ
-    # ========================================================
-
-    def binance_error(
-        self,
-        ws,
-        error
-    ):
-
-        print(
-            "Binance error:",
-            error
-        )
-
-    # ========================================================
-    # Binance - إغلاق
-    # ========================================================
-
-    def binance_closed(
-        self,
-        ws,
-        code,
-        message
-    ):
-
-        print(
-            "Binance connection closed"
-        )
-
-    # ========================================================
-    # CoinGecko
-    # ========================================================
-
-    def start_coingecko(
-        self,
-        symbol,
-        version
-    ):
-
-        # ====================================================
-        # تحويل BTCUSDT إلى bitcoin
-        # ====================================================
-
-        coin_id = self.get_coin_id(
-            symbol
-        )
-
-        if coin_id is None:
-
-            Clock.schedule_once(
-                lambda dt:
-                self.show_status(
-                    "Coin is not supported"
+                lambda dt, v=version:
+                self.show_status_if_current(
+                    "Search for and select a coin first",
+                    v
                 )
             )
-
             return
 
-        print()
-        print(
-            "CoinGecko ID:",
-            coin_id
-        )
-        print(
-            "Monitor version:",
-            version
-        )
-        print()
+        quote_currency = self.quote_currency
 
-        # ====================================================
-        # حلقة CoinGecko
-        # ====================================================
+        print("CoinGecko ID:", coin_id)
+        print("Display currency:", quote_currency)
 
         while True:
 
-            # ------------------------------------------------
-            # التأكد أن هذا هو Thread الحالي
-            # ------------------------------------------------
-
             if version != self.coingecko_version:
-
-                print(
-                    "Old CoinGecko thread stopped"
-                )
-
                 return
-
-            # ------------------------------------------------
-            # هل CoinGecko يعمل؟
-            # ------------------------------------------------
 
             if not self.coingecko_running:
-
                 return
-
-            # ------------------------------------------------
-            # هل المنصة ما زالت CoinGecko؟
-            # ------------------------------------------------
 
             if self.platform != "CoinGecko":
-
                 return
-
-            # ------------------------------------------------
-            # هل العملة تغيرت؟
-            # ------------------------------------------------
 
             if self.symbol != symbol:
-
                 return
 
-            # =================================================
-            # طلب السعر
-            # =================================================
+            if self.quote_currency != quote_currency:
+                return
 
             try:
 
-                url = (
-                    "https://api.coingecko.com/api/v3/"
-                    "simple/price"
-                    "?ids="
-                    + coin_id
-                    + "&vs_currencies=usd"
+                price = self.fetch_coingecko_price(
+                    coin_id,
+                    quote_currency
                 )
-
-                request = urllib.request.Request(
-
-                    url,
-
-                    headers={
-                        "User-Agent":
-                        "CryptoAlert/1.0"
-                    }
-                )
-
-                response = urllib.request.urlopen(
-                    request,
-                    timeout=10
-                )
-
-                text = response.read().decode()
-
-                data = json.loads(
-                    text
-                )
-
-                # ------------------------------------------------
-                # استخراج السعر
-                # ------------------------------------------------
-
-                price = float(
-                    data[coin_id]["usd"]
-                )
-
-                print(
-                    "CoinGecko price:",
-                    price
-                )
-
-                # ------------------------------------------------
-                # تحديث الشاشة
-                # ------------------------------------------------
 
                 Clock.schedule_once(
-                    lambda dt, p=price:
-                    self.show_price(p)
+                    lambda dt, p=price, v=version, q=quote_currency:
+                    self.show_coingecko_price_if_current(
+                        p, v, q
+                    )
                 )
 
-            # =================================================
-            # HTTP 429
-            # =================================================
+                wait_time = 30
 
             except urllib.error.HTTPError as error:
 
-                if error.code == 429:
-
-                    print(
-                        "CoinGecko: Too many requests."
-                    )
-
-                    print(
-                        "Waiting before trying again..."
-                    )
-
-                    # انتظار أطول عند 429
-                    wait_time = 60
-
-                else:
-
-                    print(
-                        "CoinGecko HTTP error:",
-                        error.code
-                    )
-
-                    wait_time = 20
-
-            # =================================================
-            # أخطاء أخرى
-            # =================================================
+                print("CoinGecko HTTP error:", error.code)
+                wait_time = 60 if error.code == 429 else 30
 
             except Exception as error:
 
-                print(
-                    "CoinGecko error:",
-                    error
-                )
+                print("CoinGecko error:", error)
+                wait_time = 30
 
-                wait_time = 20
+            for _ in range(wait_time):
 
-            else:
-
-                # إذا نجح الطلب
-                wait_time = 20
-
-            # =================================================
-            # الانتظار
-            #
-            # عند النجاح:
-            # 20 ثانية
-            #
-            # عند 429:
-            # 60 ثانية
-            # =================================================
-
-            print(
-                "Next CoinGecko update in",
-                wait_time,
-                "seconds"
-            )
-
-            for second in range(
-                wait_time
-            ):
-
-                # إذا تغير Thread
                 if version != self.coingecko_version:
-
                     return
 
-                # إذا توقف CoinGecko
                 if not self.coingecko_running:
-
                     return
 
-                # إذا تغيرت المنصة
                 if self.platform != "CoinGecko":
-
                     return
 
-                # إذا تغيرت العملة
                 if self.symbol != symbol:
+                    return
 
+                if self.quote_currency != quote_currency:
                     return
 
                 time.sleep(1)
 
     # ========================================================
-    # زر Refresh Now
+    # Manual refresh
     # ========================================================
 
-    def refresh_price(
-        self,
-        button
-    ):
+    def refresh_price(self, button):
 
-        # هذا الزر يعمل مع CoinGecko فقط
         if self.platform != "CoinGecko":
-
             self.status_label.text = (
                 "Refresh Now is for CoinGecko"
             )
-
             return
 
-        # التأكد من وجود العملة
-        symbol = self.symbol_box.text.upper()
+        coin_id = getattr(self, "selected_coin_id", None)
 
-        symbol = symbol.replace(
-            " ",
-            ""
-        )
-
-        symbol = symbol.replace(
-            "/",
-            ""
-        )
-
-        if symbol == "":
-
+        if not coin_id:
             self.status_label.text = (
-                "Please enter a crypto pair"
+                "Search for and select a coin first"
             )
-
             return
 
-        # البحث عن CoinGecko ID
-        coin_id = self.get_coin_id(
-            symbol
-        )
+        quote_currency = self.currency_box.text.upper()
 
-        if coin_id is None:
+        self.status_label.text = "Refreshing..."
 
-            self.status_label.text = (
-                "Coin is not supported"
-            )
-
-            return
-
-        # تشغيل طلب واحد فقط
-        thread = threading.Thread(
+        threading.Thread(
             target=self.manual_coingecko_request,
             args=(
-                symbol,
-                coin_id
+                self.symbol,
+                coin_id,
+                quote_currency
             ),
             daemon=True
-        )
-
-        thread.start()
-
-        self.status_label.text = (
-            "Refreshing..."
-        )
-
-    # ========================================================
-    # طلب CoinGecko يدوي
-    # ========================================================
+        ).start()
 
     def manual_coingecko_request(
         self,
         symbol,
-        coin_id
+        coin_id,
+        quote_currency
     ):
 
         try:
 
-            url = (
-                "https://api.coingecko.com/api/v3/"
-                "simple/price"
-                "?ids="
-                + coin_id
-                + "&vs_currencies=usd"
-            )
-
-            request = urllib.request.Request(
-
-                url,
-
-                headers={
-                    "User-Agent":
-                    "CryptoAlert/1.0"
-                }
-            )
-
-            response = urllib.request.urlopen(
-                request,
-                timeout=10
-            )
-
-            text = response.read().decode()
-
-            data = json.loads(
-                text
-            )
-
-            price = float(
-                data[coin_id]["usd"]
-            )
-
-            print(
-                "Manual CoinGecko price:",
-                price
-            )
-
-            # تحديث الشاشة
-            Clock.schedule_once(
-                lambda dt, p=price:
-                self.show_price(p)
+            price = self.fetch_coingecko_price(
+                coin_id,
+                quote_currency
             )
 
             Clock.schedule_once(
-                lambda dt:
-                self.show_status(
-                    "Price updated"
-                )
+                lambda dt, p=price, s=symbol, q=quote_currency:
+                self.show_manual_price(p, s, q)
             )
 
         except urllib.error.HTTPError as error:
 
-            if error.code == 429:
-
-                print(
-                    "Manual refresh: HTTP 429"
-                )
-
-                Clock.schedule_once(
-                    lambda dt:
-                    self.show_status(
-                        "Too many requests. Please wait."
-                    )
-                )
-
-            else:
-
-                print(
-                    "Manual HTTP error:",
-                    error.code
-                )
-
-        except Exception as error:
-
-            print(
-                "Manual CoinGecko error:",
-                error
+            message = (
+                "Too many requests. Wait and try again."
+                if error.code == 429
+                else "HTTP error: " + str(error.code)
             )
 
             Clock.schedule_once(
-                lambda dt:
+                lambda dt, m=message:
+                self.show_status(m)
+            )
+
+        except Exception as error:
+
+            print("Manual CoinGecko error:", error)
+
+            Clock.schedule_once(
+                lambda dt, e=str(error):
                 self.show_status(
-                    "Could not update price"
+                    "Could not update price: " + e
                 )
             )
 
     # ========================================================
-    # تحويل Binance symbol إلى CoinGecko ID
+    # Display helpers
     # ========================================================
 
-    def get_coin_id(
+    def show_coingecko_price_if_current(
         self,
-        symbol
+        price,
+        version,
+        quote_currency
     ):
 
-        coins = {
+        if version != self.coingecko_version:
+            return
 
-            "BTCUSDT": "bitcoin",
+        if self.platform != "CoinGecko":
+            return
 
-            "ETHUSDT": "ethereum",
+        if quote_currency != self.quote_currency:
+            return
 
-            "BNBUSDT": "binancecoin",
+        self.show_price(price)
 
-            "SOLUSDT": "solana",
-
-            "XRPUSDT": "ripple",
-
-            "ADAUSDT": "cardano",
-
-            "DOGEUSDT": "dogecoin",
-
-            "TRXUSDT": "tron",
-
-            "AVAXUSDT": "avalanche-2",
-
-            "SHIBUSDT": "shiba-inu",
-
-            "DOTUSDT": "polkadot",
-
-            "LINKUSDT": "chainlink",
-
-            "LTCUSDT": "litecoin",
-
-            "BCHUSDT": "bitcoin-cash",
-
-            "ATOMUSDT": "cosmos",
-
-            "UNIUSDT": "uniswap",
-
-            "ETCUSDT": "ethereum-classic",
-
-            "XLMUSDT": "stellar",
-
-            "NEARUSDT": "near",
-
-            "APTUSDT": "aptos",
-
-            "ARBUSDT": "arbitrum",
-
-            "OPUSDT": "optimism",
-
-            "SUIUSDT": "sui",
-
-            "PEPEUSDT": "pepe",
-
-            "TONUSDT": "the-open-network",
-
-            "FILUSDT": "filecoin",
-
-            "ICPUSDT": "internet-computer",
-
-            "HBARUSDT": "hedera-hashgraph",
-
-            "AAVEUSDT": "aave",
-
-            "MKRUSDT": "maker",
-
-            "INJUSDT": "injective-protocol",
-
-            "ALGOUSDT": "algorand",
-
-            "VETUSDT": "vechain",
-
-            "EOSUSDT": "eos",
-
-            "SANDUSDT": "the-sandbox",
-
-            "MANAUSDT": "decentraland",
-
-            "AXSUSDT": "axie-infinity",
-        }
-
-        return coins.get(
-            symbol
-        )
-
-    # ========================================================
-    # عرض السعر
-    # ========================================================
-
-    def show_price(
+    def show_manual_price(
         self,
-        price
+        price,
+        symbol,
+        quote_currency
     ):
+
+        if self.platform != "CoinGecko":
+            return
+
+        if self.symbol != symbol:
+            return
+
+        if self.quote_currency != quote_currency:
+            return
+
+        self.show_price(price)
+        self.show_status("Price updated")
+
+    def show_price(self, price):
 
         self.price = price
 
-        # تحويل BTCUSDT إلى BTC/USDT
-        display_symbol = self.symbol
+        if self.platform == "CoinGecko":
 
-        if display_symbol.endswith(
-            "USDT"
-        ):
+            coin = getattr(
+                self,
+                "search_result_map",
+                {}
+            ).get(
+                getattr(self, "search_results", None).text
+                if getattr(self, "search_results", None)
+                else ""
+            )
 
-            coin_name = display_symbol[
-                :-4
-            ]
+            base_symbol = (
+                coin.get("symbol", self.symbol).upper()
+                if coin
+                else self.symbol
+            )
 
             display_symbol = (
-                coin_name
-                + "/USDT"
+                base_symbol + "/" + self.quote_currency
             )
+
+            quote = self.quote_currency
+
+        else:
+
+            symbol = self.symbol
+
+            if symbol.endswith("USDT"):
+                base_symbol = symbol[:-4]
+                display_symbol = base_symbol + "/" + self.quote_currency
+                quote = self.quote_currency
+
+            elif symbol.endswith("USDC"):
+                display_symbol = symbol[:-4] + "/USDC"
+                quote = "USDC"
+
+            elif symbol.endswith("BUSD"):
+                display_symbol = symbol[:-4] + "/BUSD"
+                quote = "BUSD"
+
+            else:
+                display_symbol = symbol
+                quote = self.quote_currency
 
         self.price_label.text = (
             display_symbol
-            + "\n$"
+            + "\n"
+            + quote
+            + " "
             + f"{price:,.8f}"
         )
 
-        # فحص التنبيه
-        self.check_alert(
-            price
-        )
+        self.check_alert(price)
 
     # ========================================================
-    # فحص التنبيه
+    # Alert check
     # ========================================================
 
-    def check_alert(
-        self,
-        price
-    ):
+    def check_alert(self, price):
 
-        # لا يوجد تنبيه
         if not self.alert_enabled:
             return
 
-        # التنبيه حدث بالفعل
         if self.alert_triggered:
             return
 
-        # لا يوجد سعر مستهدف
         if self.target_price is None:
             return
 
-        # ====================================================
-        # السعر وصل إلى الهدف أو أعلى
-        # ====================================================
-
-        if (
-            self.condition_box.text
-            ==
-            "Price reaches or goes above"
-        ):
+        if self.condition_box.text == "Price reaches or goes above":
 
             if price >= self.target_price:
-
                 self.trigger_alert()
-
-        # ====================================================
-        # السعر وصل إلى الهدف أو أقل
-        # ====================================================
 
         else:
 
             if price <= self.target_price:
-
                 self.trigger_alert()
 
     # ========================================================
-    # تنفيذ التنبيه
+    # Trigger alert
     # ========================================================
 
     def trigger_alert(self):
 
         self.alert_enabled = False
-
         self.alert_triggered = True
 
-        # إيقاف CoinGecko
         self.stop_coingecko()
-
-        # إغلاق Binance
         self.close_binance()
 
-        # تغيير الحالة
-        self.status_label.text = (
-            "🚨 PRICE ALERT!"
-        )
-
-        try:
-            notification.notify(
-                title="Crypto Alert",
-                message=f"{self.symbol}: ${self.price:,.8f} (target: ${self.target_price:,.8f})",
-                app_name="Crypto Alert",
-                timeout=10,
-            )
-        except Exception as exc:
-            print("Notification error:", exc)
-
-        self.alert_button.text = (
-            "New Alert"
-        )
+        self.status_label.text = "PRICE ALERT!"
+        self.alert_button.text = "New Alert"
 
         print()
-        print(
-            "=========================="
-        )
-        print(
-            "🚨 PRICE ALERT!"
-        )
-        print(
-            "Coin:",
-            self.symbol
-        )
-        print(
-            "Price:",
-            self.price
-        )
-        print(
-            "Target:",
-            self.target_price
-        )
-        print(
-            "=========================="
-        )
-        print()
+        print("==========================")
+        print("PRICE ALERT!")
+        print("Coin:", self.symbol)
+        print("Platform:", self.platform)
+        print("Currency:", self.quote_currency)
+        print("Price:", self.price)
+        print("Target:", self.target_price)
+        print("==========================")
 
     # ========================================================
-    # عرض حالة
+    # Status
     # ========================================================
 
-    def show_status(
-        self,
-        message
-    ):
-
+    def show_status(self, message):
         self.status_label.text = message
+
+    def show_status_if_current(self, message, version):
+
+        if version != self.coingecko_version:
+            return
+
+        if self.platform != "CoinGecko":
+            return
+
+        self.show_status(message)
 
 
 # ============================================================
-# تشغيل البرنامج
+# Run application
 # ============================================================
 
 if __name__ == "__main__":
-
     CryptoAlertApp().run()
