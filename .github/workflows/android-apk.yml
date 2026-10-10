@@ -1,26 +1,57 @@
 name: Build Android APK
+
 on:
   workflow_dispatch:
   push:
     branches: [main, master]
+
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip python3-venv \
-            autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
-            libtinfo5 cmake libffi-dev libssl-dev build-essential ccache
+            autoconf automake libtool pkg-config zlib1g-dev libncurses5-dev \
+            libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev \
+            build-essential ccache
           python3 -m pip install --user 'buildozer>=1.5.0' 'cython==0.29.34'
-      - name: Build APK
+
+      - name: Check source syntax
+        run: python3 -m py_compile main.py service.py
+
+      - name: Build APK and save full log
+        id: apk_build
+        shell: bash
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          yes | buildozer -v android debug || { status=${PIPESTATUS[1]}; exit "$status"; }
+          set +e
+          # Answer Android SDK license questions. Suppress only the harmless
+          # 'yes: Broken pipe' message; keep the real Buildozer return code.
+          yes 2>/dev/null | buildozer -v android debug 2>&1 | tee buildozer-build.log
+          result=${PIPESTATUS[1]}
+          echo "Buildozer exit status: $result"
+          if [ "$result" -ne 0 ]; then
+            echo 'Build failed. Check buildozer-build.log, uploaded as an artifact.'
+            echo 'Last matching error lines:'
+            grep -inE 'error:|fatal:|traceback|exception|failed|no such file' buildozer-build.log | tail -45 || true
+          fi
+          exit "$result"
+
+      - name: Upload diagnostic log (including on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CryptoAlert-Build-Log
+          path: buildozer-build.log
+          if-no-files-found: warn
+
       - name: Upload APK artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: CryptoAlert-APK
