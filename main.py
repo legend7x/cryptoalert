@@ -23,6 +23,7 @@ from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
 from kivy.uix.spinner import Spinner
 from kivy.uix.scrollview import ScrollView
+from plyer import notification
 
 
 class CryptoAlertApp(App):
@@ -1071,6 +1072,17 @@ class CryptoAlertApp(App):
 
         self.status_label.text = "PRICE ALERT!"
         self.alert_button.text = "New Alert"
+
+        try:
+            notification.notify(
+                title="Crypto Alert",
+                message=f"{self.symbol}: {self.price:,.8f} {self.quote_currency} "
+                        f"(target: {self.target_price:,.8f})",
+                app_name="Crypto Alert",
+                timeout=10,
+            )
+        except Exception as error:
+            print("Android notification error:", error)
 
         print()
         print("==========================")

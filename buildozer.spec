@@ -40,7 +40,7 @@ android.minapi = 24
 android.ndk_api = 24
 
 # معماريات Android
-android.archs = arm64-v8a,armeabi-v7a
+android.archs = arm64-v8a
 
 # اسم التطبيق
 android.entrypoint = org.kivy.android.PythonActivity
